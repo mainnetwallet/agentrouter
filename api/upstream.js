@@ -16,7 +16,7 @@
  *  - The transport is runtime agnostic (Node >= 18 and Cloudflare Workers).
  */
 
-export const DEFAULT_AGENTROUTER_BASE_URL = 'https://agentrouter.org';
+export const DEFAULT_AGENTROUTER_BASE_URL = 'https://agentrouter.org/v1';
 export const DEFAULT_TIMEOUT_MS = 30000;
 export const MIN_TIMEOUT_MS = 50;
 export const MAX_PREVIEW_CHARS = 500;
@@ -32,10 +32,29 @@ function envValue(name, env) {
   return undefined;
 }
 
-/** Upstream base URL, without a trailing slash. */
+/**
+ * Normalise an upstream base URL to the API root, without a trailing slash and
+ * without a trailing `/v1`.
+ *
+ * The official docs show the base as `https://agentrouter.org/v1`, while every
+ * route in this bridge is already written as `/v1/...`. Accepting both spellings
+ * here means either form works and never produces `/v1/v1/...` upstream:
+ *
+ *   https://agentrouter.org        -> https://agentrouter.org
+ *   https://agentrouter.org/       -> https://agentrouter.org
+ *   https://agentrouter.org/v1     -> https://agentrouter.org
+ *   https://agentrouter.org/v1/    -> https://agentrouter.org
+ *   https://proxy.test/openai/v1   -> https://proxy.test/openai
+ */
+export function normalizeBaseUrl(raw) {
+  let url = String(raw || '').trim().replace(/\/+$/, '');
+  if (/\/v1$/i.test(url)) url = url.replace(/\/v1$/i, '');
+  return url.replace(/\/+$/, '');
+}
+
+/** Upstream API root resolved from AGENTROUTER_BASE_URL. */
 export function resolveAgentRouterBaseUrl(env) {
-  const raw = envValue('AGENTROUTER_BASE_URL', env) || DEFAULT_AGENTROUTER_BASE_URL;
-  return raw.replace(/\/+$/, '');
+  return normalizeBaseUrl(envValue('AGENTROUTER_BASE_URL', env) || DEFAULT_AGENTROUTER_BASE_URL);
 }
 
 /** Upstream request timeout in milliseconds (AGENTROUTER_TIMEOUT_MS). */

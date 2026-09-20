@@ -12,6 +12,7 @@
 
 import {
   describeApiKey,
+  normalizeBaseUrl,
   fetchUpstream,
   hasUnsafeKeyChars,
   normalizeApiKey,
@@ -68,7 +69,7 @@ export function isAuthDebugEnabled(env) {
  * Returns status/content-type/preview only - never the key.
  */
 export async function probeUpstreamModels(key, env, { method = 'GET', baseUrl } = {}) {
-  const base = (baseUrl || resolveAgentRouterBaseUrl(env)).replace(/\/+$/, '');
+  const base = normalizeBaseUrl(baseUrl || resolveAgentRouterBaseUrl(env));
   const upstreamUrl = `${base}/v1/models`;
   const timeoutMs = resolveTimeoutMs(env);
   const fingerprint = describeApiKey(key).key_fingerprint;

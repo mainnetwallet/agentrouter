@@ -24,7 +24,7 @@ Every variable is optional. The defaults work out of the box.
 
 | Variable | Default | Required | Description |
 |---|---|---|---|
-| `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | No | Upstream AgentRouter API base URL. Defined in exactly one place (`api/upstream.js`). OpenAI-compatible routes append `/v1` (`https://agentrouter.org/v1/models`); the Anthropic route appends `/v1/messages`. Override this only if AgentRouter changes hosts. |
+| `AGENTROUTER_BASE_URL` | `https://agentrouter.org/v1` | No | Upstream AgentRouter API base URL, written exactly as the official docs show it. Defined in exactly one place (`api/upstream.js`). Routes are appended to it: `/models`, `/chat/completions`, `/messages` → `https://agentrouter.org/v1/models` etc. Both `https://agentrouter.org/v1` and `https://agentrouter.org` are accepted; a trailing `/v1` is stripped once, so `/v1/v1/...` can never be produced. |
 | `AGENTROUTER_TIMEOUT_MS` | `30000` | No | Upstream timeout in ms. Covers connection + response headers, and the body read for non-streaming responses. For streaming responses it is the idle timeout between chunks. |
 | `PORT` | `3000` | No | Node/Render listen port. Render sets this automatically. |
 | `AGENTROUTER_DEBUG_AUTH` | *(unset)* | No | Set to `1` to enable `GET /v1/debug/auth` (authentication diagnostics). Off by default; when off the route returns `404`. |

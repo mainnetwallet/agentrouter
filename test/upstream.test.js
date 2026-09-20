@@ -12,6 +12,7 @@ import {
   logUpstreamFailure,
   parseAgentRouterJson,
   previewBody,
+  normalizeBaseUrl,
   resolveAgentRouterBaseUrl,
   resolveTimeoutMs,
 } from '../api/upstream.js';
@@ -28,15 +29,39 @@ function captureError(fn) {
 }
 
 test('base URL: defaults to the official AgentRouter API when unset', () => {
-  assert.equal(resolveAgentRouterBaseUrl({}), DEFAULT_AGENTROUTER_BASE_URL);
-  assert.equal(resolveAgentRouterBaseUrl(undefined), DEFAULT_AGENTROUTER_BASE_URL);
-  assert.equal(DEFAULT_AGENTROUTER_BASE_URL, 'https://agentrouter.org');
+  // The documented default is written with the /v1 suffix; the resolver strips it
+  // because every route below is already written as /v1/...
+  assert.equal(DEFAULT_AGENTROUTER_BASE_URL, 'https://agentrouter.org/v1');
+  assert.equal(resolveAgentRouterBaseUrl({}), 'https://agentrouter.org');
+  assert.equal(resolveAgentRouterBaseUrl(undefined), 'https://agentrouter.org');
+  assert.equal(buildUpstreamUrl('/v1/models', '', {}), 'https://agentrouter.org/v1/models');
 });
 
 test('base URL: is overridable and trailing slashes are stripped', () => {
   assert.equal(resolveAgentRouterBaseUrl({ AGENTROUTER_BASE_URL: 'https://example.test' }), 'https://example.test');
   assert.equal(resolveAgentRouterBaseUrl({ AGENTROUTER_BASE_URL: 'https://example.test///' }), 'https://example.test');
-  assert.equal(resolveAgentRouterBaseUrl({ AGENTROUTER_BASE_URL: '   ' }), DEFAULT_AGENTROUTER_BASE_URL);
+  assert.equal(resolveAgentRouterBaseUrl({ AGENTROUTER_BASE_URL: '   ' }), 'https://agentrouter.org');
+});
+
+test('base URL: a trailing /v1 is accepted and never doubled', () => {
+  // The official docs write the base as https://agentrouter.org/v1 - either form
+  // must resolve to the same upstream URLs.
+  assert.equal(normalizeBaseUrl('https://agentrouter.org/v1'), 'https://agentrouter.org');
+  assert.equal(normalizeBaseUrl('https://agentrouter.org/v1/'), 'https://agentrouter.org');
+  assert.equal(normalizeBaseUrl('https://agentrouter.org'), 'https://agentrouter.org');
+  assert.equal(normalizeBaseUrl('https://agentrouter.org///'), 'https://agentrouter.org');
+  assert.equal(normalizeBaseUrl('https://proxy.test/openai/v1'), 'https://proxy.test/openai');
+  assert.equal(normalizeBaseUrl('  https://proxy.test/V1  '), 'https://proxy.test');
+  assert.equal(normalizeBaseUrl('https://proxy.test/v1beta'), 'https://proxy.test/v1beta');
+
+  for (const input of ['https://agentrouter.org', 'https://agentrouter.org/', 'https://agentrouter.org/v1', 'https://agentrouter.org/v1/']) {
+    const env = { AGENTROUTER_BASE_URL: input };
+    assert.equal(resolveAgentRouterBaseUrl(env), 'https://agentrouter.org');
+    assert.equal(buildUpstreamUrl('/v1/models', '', env), 'https://agentrouter.org/v1/models');
+    assert.equal(buildUpstreamUrl('/v1/chat/completions', '', env), 'https://agentrouter.org/v1/chat/completions');
+    assert.equal(buildUpstreamUrl('/v1/messages', '', env), 'https://agentrouter.org/v1/messages');
+    assert.ok(!buildUpstreamUrl('/v1/models', '', env).includes('/v1/v1'), 'must not double /v1');
+  }
 });
 
 test('base URL: falls back to process.env for Node runtimes', () => {
