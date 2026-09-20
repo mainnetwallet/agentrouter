@@ -11,7 +11,6 @@
  */
 
 import {
-  buildUpstreamUrl,
   describeApiKey,
   fetchUpstream,
   hasUnsafeKeyChars,
@@ -40,6 +39,25 @@ export const CANDIDATE_KEY_ENV_VARS = [
   'ANTHROPIC_AUTH_TOKEN',
 ];
 
+/**
+ * Known AgentRouter API hosts. The published docs use agentrouter.org, while
+ * co.agentrouter.org serves the same API surface; behaviour differs per host and
+ * per network, so the diagnostic probes both (and the configured base URL).
+ * This is a fixed allow-list - the endpoint never fetches an arbitrary URL.
+ */
+export const PROBE_HOSTS = [
+  { name: 'agentrouter.org', base_url: 'https://agentrouter.org', documented: true },
+  { name: 'co.agentrouter.org', base_url: 'https://co.agentrouter.org', documented: false },
+];
+
+function hostKeyFor(baseUrl) {
+  try {
+    return new URL(baseUrl).origin;
+  } catch {
+    return baseUrl;
+  }
+}
+
 export function isAuthDebugEnabled(env) {
   const raw = env?.AGENTROUTER_DEBUG_AUTH ?? (typeof process !== 'undefined' ? process.env?.AGENTROUTER_DEBUG_AUTH : undefined);
   return ['1', 'true', 'yes', 'on'].includes(String(raw || '').trim().toLowerCase());
@@ -49,8 +67,9 @@ export function isAuthDebugEnabled(env) {
  * Call the upstream models endpoint with a given key.
  * Returns status/content-type/preview only - never the key.
  */
-export async function probeUpstreamModels(key, env, { method = 'GET' } = {}) {
-  const upstreamUrl = buildUpstreamUrl('/v1/models', '', env);
+export async function probeUpstreamModels(key, env, { method = 'GET', baseUrl } = {}) {
+  const base = (baseUrl || resolveAgentRouterBaseUrl(env)).replace(/\/+$/, '');
+  const upstreamUrl = `${base}/v1/models`;
   const timeoutMs = resolveTimeoutMs(env);
   const fingerprint = describeApiKey(key).key_fingerprint;
 
@@ -92,9 +111,31 @@ export function describeKeyEnvVars(env) {
     }));
 }
 
-function diagnose({ callerProbe, envProbe, requestKey, envKeys }) {
+/** agentrouter.org currently answers every request with this client check. */
+export function isClientVerificationWall(bodyPreview) {
+  if (typeof bodyPreview !== 'string') return false;
+  return /unauthorized client detected|UNAUTHENTICATED/i.test(bodyPreview);
+}
+
+function diagnose({ callerProbe, envProbe, requestKey, envKeys, probesByHost = {} }) {
+  const workingHosts = Object.values(probesByHost).filter((entry) => entry.status === 200);
+  const walledHosts = Object.values(probesByHost).filter((entry) => entry.client_verification_wall);
+  const configured = Object.values(probesByHost).find((entry) => entry.configured);
+
   if (requestKey.key_present && callerProbe?.status === 200) {
-    return 'The key sent by the client is accepted by the upstream API. Authentication through the bridge works.';
+    return 'The key sent by the client is accepted by the configured upstream API. Authentication through the bridge works.';
+  }
+
+  if (workingHosts.length > 0) {
+    return `The same key is accepted by ${workingHosts.map((entry) => entry.name).join(', ')} but rejected by the configured host (${configured?.name}). Change AGENTROUTER_BASE_URL to a host that accepts the key.`;
+  }
+
+  if (configured?.client_verification_wall) {
+    return 'The configured host (agentrouter.org) answered with a client-verification / "unauthorized client detected" wall that is independent of the API key, so no key can authenticate against it from this network. This is an upstream restriction; the bridge must not attempt to bypass it. Use a host that serves the API properly (see probes_by_host).';
+  }
+
+  if (walledHosts.length > 0) {
+    return `Every host rejected the key. Note: ${walledHosts.map((entry) => entry.name).join(', ')} blocks the client before authentication ("unauthorized client detected"), which is an upstream restriction, not a key problem. The remaining host rejected the key itself.`;
   }
   if (callerProbe?.status === 401 || callerProbe?.status === 403) {
     if (envProbe?.status === 200) {
@@ -126,6 +167,39 @@ export async function buildAuthReport({ key, source, issues = [], env, endpoint 
 
   const probeCallerKey = await probeUpstreamModels(key, env, { method: 'GET' });
 
+  // Compare the configured host against the known hosts with the same key.
+  const configuredBase = resolveAgentRouterBaseUrl(env);
+  const candidates = new Map();
+  const configuredOrigin = hostKeyFor(configuredBase);
+  candidates.set(configuredOrigin, { name: configuredOrigin.replace(/^https?:\/\//, ''), base_url: configuredBase, configured: true });
+  for (const host of PROBE_HOSTS) {
+    const origin = hostKeyFor(host.base_url);
+    const existing = candidates.get(origin);
+    if (existing) {
+      if (existing.configured) continue; // never clobber the configured entry
+      candidates.set(origin, host);
+    } else {
+      candidates.set(origin, host);
+    }
+  }
+
+  const probesByHost = {};
+  for (const [origin, host] of candidates) {
+    const result = origin === configuredOrigin
+      ? probeCallerKey
+      : await probeUpstreamModels(key, env, { method: 'GET', baseUrl: host.base_url });
+    probesByHost[origin] = {
+      name: host.name,
+      configured: Boolean(host.configured),
+      documented_in_docs: Boolean(host.documented),
+      status: result.status,
+      content_type: result.content_type ?? 'none',
+      error_code: result.error_code ?? null,
+      client_verification_wall: isClientVerificationWall(result.body_preview),
+      body_preview: result.body_preview ?? result.error_message ?? null,
+    };
+  }
+
   // Only probe with a server-side key when the caller demonstrably holds that
   // same key, so the endpoint cannot be used as a free proxy for the server key.
   let probeEnvKey;
@@ -154,9 +228,18 @@ export async function buildAuthReport({ key, source, issues = [], env, endpoint 
     request_key: requestKey,
     env_keys_configured: envKeys,
     probe_a_direct_upstream_with_same_key: probeCallerKey,
+    probes_by_host: probesByHost,
     probe_env_key: probeEnvKey,
     diagnosis: diagnose({ callerProbe: probeCallerKey, envProbe: probeEnvKey.status ? probeEnvKey : undefined, requestKey, envKeys }),
+    host_comparison: Object.values(probesByHost).map((entry) => ({
+      host: entry.name,
+      configured: entry.configured,
+      documented_in_docs: entry.documented_in_docs,
+      status: entry.status,
+      client_verification_wall: entry.client_verification_wall,
+    })),
     notes: [
+      'agentrouter.org answers "unauthorized client detected" regardless of the API key (client verification); co.agentrouter.org performs normal key authentication.',
       'The bridge does not modify the key value: it normalises whitespace/quotes/duplicate Bearer prefixes and forwards "Authorization: Bearer <key>".',
       'No key is logged or returned: only presence, length, first/last 3 characters and a fingerprint.',
     ],

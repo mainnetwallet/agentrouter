@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'http';
 import { handleRequest } from '../server.js';
+import { isClientVerificationWall } from '../api/diagnostics.js';
 import {
   describeApiKey,
   hasUnsafeKeyChars,
@@ -361,6 +362,38 @@ test('auth diagnostics does not use the server key when the caller sends a diffe
     assert.equal(report.probe_a_direct_upstream_with_same_key.status, 401);
     assert.ok(!JSON.stringify(report).includes(FAKE_KEY));
     assert.ok(!JSON.stringify(report).includes(OTHER_FAKE_KEY));
+    await bridge.close();
+  } finally {
+    await upstream.close();
+  }
+});
+
+test('isClientVerificationWall detects the agentrouter.org client check', () => {
+  assert.equal(isClientVerificationWall('{"error":{"message":"unauthorized client detected, contact support for assistance at https://discord.gg/x"},"message":"UNAUTHENTICATED"}'), true);
+  assert.equal(isClientVerificationWall('{"code":401,"msg":"Invalid API Key!","data":null}'), false);
+  assert.equal(isClientVerificationWall(''), false);
+  assert.equal(isClientVerificationWall(undefined), false);
+});
+
+test('auth diagnostics compares the configured host with the known hosts using the same key', async () => {
+  // The configured host accepts the key; the allow-listed alternates need not
+  // resolve, so the report must still be produced.
+  const upstream = await startUpstream((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"data":[{"id":"glm-5.3"}]}');
+  });
+  try {
+    const bridge = await startBridge({ AGENTROUTER_BASE_URL: upstream.baseUrl, AGENTROUTER_DEBUG_AUTH: '1' });
+    const res = await fetch(`${bridge.baseUrl}/v1/debug/auth`, { headers: { authorization: `Bearer ${FAKE_KEY}` } });
+    const report = await res.json();
+    assert.equal(res.status, 200);
+    assert.ok(report.probes_by_host, 'report must include probes_by_host');
+    const configuredEntries = Object.values(report.probes_by_host).filter((entry) => entry.configured);
+    assert.equal(configuredEntries.length, 1, 'exactly one host must be marked configured');
+    assert.equal(configuredEntries[0].status, 200);
+    assert.equal(configuredEntries[0].name, configuredEntries[0].name.replace(/^https?:\/\//, ''));
+    assert.ok(report.host_comparison.length >= 1);
+    assert.ok(!JSON.stringify(report).includes(FAKE_KEY));
     await bridge.close();
   } finally {
     await upstream.close();

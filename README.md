@@ -219,6 +219,59 @@ To compare against the upstream directly without the bridge:
 curl -i "https://co.agentrouter.org/v1/models" -H "Authorization: Bearer YOUR_AGENTROUTER_KEY"
 ```
 
+### Which upstream host actually works?
+
+AgentRouter currently exposes two API hosts and they do **not** behave the same:
+
+| Host | Behaviour |
+|---|---|
+| `https://agentrouter.org` (the host in the published docs, `/v1` for OpenAI-compatible) | Answers `401 {"message":"UNAUTHENTICATED","error":{"message":"unauthorized client detected, ..."}}` **regardless of the API key**, i.e. a client-verification wall that runs before authentication. |
+| `https://co.agentrouter.org` | Normal API authentication: `401 {"code":401,"msg":"Missing API Key!"}` with no key and `401 {"code":401,"msg":"Invalid API Key!"}` with a bad one. |
+
+`GET /v1/debug/auth` probes the configured host **and** both known hosts with the caller's key, and
+reports the result per host:
+
+```jsonc
+"probes_by_host": {
+  "https://co.agentrouter.org": { "name": "co.agentrouter.org", "configured": true,
+                                  "status": 401, "client_verification_wall": false,
+                                  "body_preview": "{\"code\":401,\"msg\":\"Invalid API Key!\"}" },
+  "https://agentrouter.org":    { "name": "agentrouter.org", "configured": false,
+                                  "documented_in_docs": true, "status": 401,
+                                  "client_verification_wall": true }
+}
+```
+
+Set `AGENTROUTER_BASE_URL` to whichever host returns `200` for your key. The allow-list is fixed -
+the endpoint never fetches an arbitrary URL.
+
+The bridge deliberately does **not** attempt to defeat the `unauthorized client detected` wall:
+no spoofed fingerprints or verification headers are added.
+
+## MiniiChat / OpenAI-compatible client setup
+
+```
+API Base URL : https://agentrouter.onrender.com/v1
+API Key      : <your AgentRouter key>
+Model        : a model id from the AgentRouter pricing page, e.g. glm-5.3
+```
+
+Model ids are dynamic and must match the pricing/list page **exactly** (including hyphens). A wrong
+or retired model id makes AgentRouter answer `503` (`no available channel`), which is a different
+problem from a `401`. Known-good examples at the time of writing: `glm-5.3`, `deepseek-v4-flash`,
+`gpt-5.6-sol`, `gpt-6-astra`, `claude-opus-5`, `claude-opus-4-8`. Use `GET /v1/models` (with your
+key) to list what is live for your account rather than trusting a fixed list.
+
+### Common MiniiChat errors
+
+| Symptom | Cause |
+|---|---|
+| `401 {"code":401,"msg":"Invalid API Key!"}` | The key sent by the client is rejected by the upstream host (compare hosts above). |
+| `401 {"message":"UNAUTHENTICATED","error":{"message":"unauthorized client detected ..."}}` | You are pointed at `agentrouter.org`, which is applying a client-verification wall before auth. |
+| `401 ... missing_api_key` (bridge's own error) | MiniiChat is not sending the key at all; check the "API Key" field. |
+| `503`, `model not found`, empty model list | Model id is wrong/retired, or the key has no access to that model. |
+| `502 non_json_response` | Upstream returned HTML (WAF/interstitial); see the `preview` field. |
+
 ### Diagnostics
 
 An upstream `401`/`403` logs a single line with key metadata only:
