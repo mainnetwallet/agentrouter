@@ -23,7 +23,7 @@ export const CLAUDE_CODE_HEADERS = {
 
 /** Headers safe to copy back from upstream (never cookies or auth headers). */
 const SAFE_UPSTREAM_HEADER_PREFIXES = ['x-ratelimit-', 'anthropic-ratelimit-'];
-const SAFE_UPSTREAM_HEADERS = ['retry-after', 'request-id', 'x-request-id', 'openai-processing-ms', 'anthropic-version'];
+const SAFE_UPSTREAM_HEADERS = ['retry-after', 'request-id', 'x-request-id', 'x-error-code', 'openai-processing-ms', 'anthropic-version'];
 
 export function collectBody(req) {
   return new Promise((resolve, reject) => {

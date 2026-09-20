@@ -222,6 +222,7 @@ export async function proxyAgentRouter(req, res, options) {
   }
 
   const preview = scrubSecret(previewBody(text), clientKey);
+  const upstreamErrorCode = upstream.headers.get('x-error-code');
   logUpstreamDiagnostics({
     event: 'upstream_response',
     url: upstreamUrl,
@@ -230,6 +231,7 @@ export async function proxyAgentRouter(req, res, options) {
     contentType,
     durationMs,
     preview,
+    note: upstreamErrorCode ? `upstream_error_code=${upstreamErrorCode}` : undefined,
   });
 
   try {
@@ -241,6 +243,7 @@ export async function proxyAgentRouter(req, res, options) {
     logUpstreamFailure(failure, { url: upstreamUrl, method, event: 'upstream_invalid_payload' });
     return sendError(res, failure.status, failure.message, failure.type, failure.code, {
       ...baseDetails,
+      ...(upstreamErrorCode ? { upstream_error_code: upstreamErrorCode } : {}),
       ...failure.details,
       preview,
     });

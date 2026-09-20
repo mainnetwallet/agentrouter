@@ -401,3 +401,37 @@ test('diagnostics never log the client API key or Authorization header', async (
     await upstream.close();
   }
 });
+
+test('upstream x-error-code is surfaced to the client and in 502 diagnostics', async () => {
+  const upstream = await startUpstream((_req, res) => {
+    res.writeHead(401, { 'content-type': 'application/json', 'x-error-code': '40001', 'x-request-id': 'req-123' });
+    res.end('{"code":401,"msg":"Invalid API Key!","data":null}');
+  });
+  const bridge = await startBridge({ AGENTROUTER_BASE_URL: upstream.baseUrl });
+  try {
+    const res = await fetch(`${bridge.baseUrl}/v1/models`, { headers: { authorization: `Bearer ${KEY}` } });
+    assert.equal(res.status, 401);
+    assert.equal(res.headers.get('x-error-code'), '40001');
+    assert.equal(res.headers.get('x-request-id'), 'req-123');
+  } finally {
+    await bridge.close();
+    await upstream.close();
+  }
+});
+
+test('upstream x-error-code appears in the non-JSON 502 error body', async () => {
+  const upstream = await startUpstream((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html', 'x-error-code': '51402' });
+    res.end('<!doctype html><html>waf</html>');
+  });
+  const bridge = await startBridge({ AGENTROUTER_BASE_URL: upstream.baseUrl });
+  try {
+    const res = await bridgeRequest(bridge.baseUrl, '/v1/models');
+    assert.equal(res.status, 502);
+    assert.equal(res.json.error.code, 'non_json_response');
+    assert.equal(res.json.error.upstream_error_code, '51402');
+  } finally {
+    await bridge.close();
+    await upstream.close();
+  }
+});
