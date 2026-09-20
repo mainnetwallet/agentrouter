@@ -1,6 +1,6 @@
 # AgentRouter Bridge
 
-Public OpenAI + Anthropic compatible bridge for [AgentRouter](https://co.agentrouter.org/).
+Public OpenAI + Anthropic compatible bridge for [AgentRouter](https://agentrouter.org/).
 
 **Bring your own API key** — stateless bridge. Clients pass their own AgentRouter key in
 `Authorization: Bearer <key>` (or `x-api-key`). No server-side key is required (see
@@ -24,7 +24,7 @@ Every variable is optional. The defaults work out of the box.
 
 | Variable | Default | Required | Description |
 |---|---|---|---|
-| `AGENTROUTER_BASE_URL` | `https://co.agentrouter.org` | No | Upstream AgentRouter API base URL. Defined in exactly one place (`api/upstream.js`). OpenAI-compatible routes append `/v1` (`https://co.agentrouter.org/v1/models`); the Anthropic route appends `/v1/messages`. Override this only if AgentRouter changes hosts. |
+| `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | No | Upstream AgentRouter API base URL. Defined in exactly one place (`api/upstream.js`). OpenAI-compatible routes append `/v1` (`https://agentrouter.org/v1/models`); the Anthropic route appends `/v1/messages`. Override this only if AgentRouter changes hosts. |
 | `AGENTROUTER_TIMEOUT_MS` | `30000` | No | Upstream timeout in ms. Covers connection + response headers, and the body read for non-streaming responses. For streaming responses it is the idle timeout between chunks. |
 | `PORT` | `3000` | No | Node/Render listen port. Render sets this automatically. |
 | `AGENTROUTER_DEBUG_AUTH` | *(unset)* | No | Set to `1` to enable `GET /v1/debug/auth` (authentication diagnostics). Off by default; when off the route returns `404`. |
@@ -129,7 +129,7 @@ Error envelope:
     "type": "upstream_error",
     "code": "non_json_response",
     "status": 502,
-    "upstream_url": "https://co.agentrouter.org/v1/models",
+    "upstream_url": "https://agentrouter.org/v1/models",
     "upstream_status": 200,
     "upstream_content_type": "text/html; charset=utf-8",
     "preview": "<!doctype html> ..."
@@ -217,33 +217,23 @@ again when you are done.
 To compare against the upstream directly without the bridge:
 
 ```bash
-curl -i "https://co.agentrouter.org/v1/models" -H "Authorization: Bearer YOUR_AGENTROUTER_KEY"
+curl -i "https://agentrouter.org/v1/models" -H "Authorization: Bearer YOUR_AGENTROUTER_KEY"
 ```
 
 ### Which upstream host actually works?
 
-AgentRouter currently exposes two API hosts and they do **not** behave the same:
+Verified against the live API with a key that is confirmed working:
 
 | Host | Behaviour |
 |---|---|
-| `https://agentrouter.org` (the host in the published docs, `/v1` for OpenAI-compatible) | Answers `401 {"message":"UNAUTHENTICATED","error":{"message":"unauthorized client detected, ..."}}` **regardless of the API key**, i.e. a client-verification wall that runs before authentication. |
-| `https://co.agentrouter.org` | Normal API authentication: `401 {"code":401,"msg":"Missing API Key!"}` with no key and `401 {"code":401,"msg":"Invalid API Key!"}` with a bad one. |
+| `https://agentrouter.org` — the host in the official docs, and what Codex CLI / Claude Code are configured with | Works for **genuine coding clients**. `codex exec` completes normally against it with the same key. Generic HTTP clients (curl, a proxy, this bridge) are answered with `401 {"message":"UNAUTHENTICATED","error":{"message":"unauthorized client detected ..."}}` — a client-verification wall that runs **before** authentication, so the API key is never even examined. |
+| `https://co.agentrouter.org` | Rejects keys issued for `agentrouter.org` outright: `401 {"code":401,"msg":"Invalid API Key!"}` with header `x-error-code: 40001`, for every supported auth header (`Authorization: Bearer`, `x-api-key`, `x-goog-api-key`, `x-google-api-key`). |
 
-`GET /v1/debug/auth` probes the configured host **and** both known hosts with the caller's key, and
-reports the result per host:
+Because the wall is *client*-based rather than key- or IP-based, a proxy cannot authenticate against
+`agentrouter.org`; this bridge therefore does not try to imitate a coding client's fingerprint to get
+past it. `GET /v1/debug/auth` still probes both hosts and reports the result per host.
 
-```jsonc
-"probes_by_host": {
-  "https://co.agentrouter.org": { "name": "co.agentrouter.org", "configured": true,
-                                  "status": 401, "client_verification_wall": false,
-                                  "body_preview": "{\"code\":401,\"msg\":\"Invalid API Key!\"}" },
-  "https://agentrouter.org":    { "name": "agentrouter.org", "configured": false,
-                                  "documented_in_docs": true, "status": 401,
-                                  "client_verification_wall": true }
-}
-```
-
-Set `AGENTROUTER_BASE_URL` to whichever host returns `200` for your key. The allow-list is fixed -
+Set `AGENTROUTER_BASE_URL` to whatever host accepts your key.
 the endpoint never fetches an arbitrary URL.
 
 The bridge deliberately does **not** attempt to defeat the `unauthorized client detected` wall:
@@ -294,7 +284,7 @@ Exit code is `0` when at least one host accepted the key, `1` otherwise.
 An upstream `401`/`403` logs a single line with key metadata only:
 
 ```
-[agentrouter] event=auth_diagnostic method=GET url=https://co.agentrouter.org/v1/models upstream_status=401 \
+[agentrouter] event=auth_diagnostic method=GET url=https://agentrouter.org/v1/models upstream_status=401 \
   key_source=authorization key_present=true key_length=45 key_first3=sk- key_last3=xyz \
   key_fingerprint=1a2b3c4d key_issues=none authorization_header_constructed=true \
   authorization_scheme=Bearer authorization_header_value=<redacted>
@@ -313,7 +303,7 @@ The goal is to surface that failure, not hide it.
    a WAF/captcha or interstitial page, not an API response.
 2. **Check the logs.** Every upstream call logs one line, and failures log a second:
    ```
-   [agentrouter] event=upstream_response method=GET url=https://co.agentrouter.org/v1/models status=200 content-type=text/html duration_ms=214
+   [agentrouter] event=upstream_response method=GET url=https://agentrouter.org/v1/models status=200 content-type=text/html duration_ms=214
    [agentrouter] body_preview(<=500 chars): <!doctype html><html>...
    ```
    Logs contain **only** URL, method, status, content-type, duration and a 500-character body

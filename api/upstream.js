@@ -8,15 +8,15 @@
  *
  * Design rules:
  *  - The default host is the documented API base:
- *      OpenAI-compatible: https://co.agentrouter.org/v1
- *      Anthropic:         https://co.agentrouter.org
+ *      OpenAI-compatible: https://agentrouter.org/v1
+ *      Anthropic:         https://agentrouter.org
  *  - Never log secrets: no Authorization headers, cookies, API keys or bodies.
  *  - Diagnostics are limited to URL, method, status, content-type, duration and
  *    a truncated (<= 500 char) upstream body preview.
  *  - The transport is runtime agnostic (Node >= 18 and Cloudflare Workers).
  */
 
-export const DEFAULT_AGENTROUTER_BASE_URL = 'https://co.agentrouter.org';
+export const DEFAULT_AGENTROUTER_BASE_URL = 'https://agentrouter.org';
 export const DEFAULT_TIMEOUT_MS = 30000;
 export const MIN_TIMEOUT_MS = 50;
 export const MAX_PREVIEW_CHARS = 500;

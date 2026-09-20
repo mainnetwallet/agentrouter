@@ -30,7 +30,7 @@ function captureError(fn) {
 test('base URL: defaults to the official AgentRouter API when unset', () => {
   assert.equal(resolveAgentRouterBaseUrl({}), DEFAULT_AGENTROUTER_BASE_URL);
   assert.equal(resolveAgentRouterBaseUrl(undefined), DEFAULT_AGENTROUTER_BASE_URL);
-  assert.equal(DEFAULT_AGENTROUTER_BASE_URL, 'https://co.agentrouter.org');
+  assert.equal(DEFAULT_AGENTROUTER_BASE_URL, 'https://agentrouter.org');
 });
 
 test('base URL: is overridable and trailing slashes are stripped', () => {
@@ -63,7 +63,7 @@ test('buildUpstreamUrl: joins base, path and query string', () => {
   assert.equal(buildUpstreamUrl('/v1/models', '', env), 'https://example.test/v1/models');
   assert.equal(buildUpstreamUrl('/v1/messages', '?beta=true', env), 'https://example.test/v1/messages?beta=true');
   assert.equal(buildUpstreamUrl('v1/models', 'beta=true', env), 'https://example.test/v1/models?beta=true');
-  assert.equal(buildUpstreamUrl('/v1/models', '', {}), 'https://co.agentrouter.org/v1/models');
+  assert.equal(buildUpstreamUrl('/v1/models', '', {}), 'https://agentrouter.org/v1/models');
 });
 
 test('content-type helpers', () => {
@@ -150,7 +150,7 @@ test('diagnostics: logs URL/status/content-type/preview but never secrets', asyn
   const warnings = await captureWarnings(() => {
     logUpstreamDiagnostics({
       event: 'upstream_response',
-      url: 'https://co.agentrouter.org/v1/models',
+      url: 'https://agentrouter.org/v1/models',
       method: 'GET',
       status: 200,
       contentType: 'text/html',
@@ -158,7 +158,7 @@ test('diagnostics: logs URL/status/content-type/preview but never secrets', asyn
       preview: previewBody('<!doctype html><title>WAF</title>'),
     });
     logUpstreamFailure(Object.assign(new UpstreamError('Upstream AgentRouter returned a non-JSON response', { status: 502, code: 'non_json_response' }), {}), {
-      url: 'https://co.agentrouter.org/v1/models',
+      url: 'https://agentrouter.org/v1/models',
       method: 'GET',
     });
     // Nothing in this module may ever log these values:
