@@ -60,7 +60,8 @@ npm start
 ```
 
 ```bash
-npm test     # 43 tests: JSON/HTML/invalid/empty bodies, 401/403/404/429/500, DNS, network, timeout, streaming
+npm run selftest  # end-to-end key/host check (needs AGENTROUTER_KEY)
+npm test     # 64 tests: JSON/HTML/invalid/empty bodies, 401/403/404/429/500, DNS, network, timeout, streaming
 npm run check  # node --check on every source file
 ```
 
@@ -271,6 +272,22 @@ key) to list what is live for your account rather than trusting a fixed list.
 | `401 ... missing_api_key` (bridge's own error) | MiniiChat is not sending the key at all; check the "API Key" field. |
 | `503`, `model not found`, empty model list | Model id is wrong/retired, or the key has no access to that model. |
 | `502 non_json_response` | Upstream returned HTML (WAF/interstitial); see the `preview` field. |
+
+### One-command self test (no key sharing needed)
+
+```bash
+AGENTROUTER_KEY='<your key>' node scripts/selftest.mjs https://your-service.onrender.com [--model glm-5.3]
+```
+
+The key is read from the environment only (never argv, so it stays out of shell history and `ps`),
+and it is scrubbed from every line printed. The script:
+
+- **A)** calls `GET /v1/models` and `POST /v1/chat/completions` **directly** against each known host;
+- **B)** calls the same endpoints **through your deployed bridge**;
+- prints a verdict: which host accepts the key, which host is behind the client-verification wall,
+  and whether the bridge agrees with the direct call.
+
+Exit code is `0` when at least one host accepted the key, `1` otherwise.
 
 ### Diagnostics
 
