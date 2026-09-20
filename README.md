@@ -1,6 +1,6 @@
 # AgentRouter Bridge
 
-Public OpenAI + Anthropic compatible bridge for [AgentRouter](https://agentrouter.org/).
+Public OpenAI + Anthropic compatible bridge for [AgentRouter](https://co.agentrouter.org/).
 
 **Bring your own API key** — stateless bridge. Clients pass their own AgentRouter key in
 `Authorization: Bearer <key>` (or `x-api-key`). No server-side key is required (see
@@ -24,7 +24,7 @@ Every variable is optional. The defaults work out of the box.
 
 | Variable | Default | Required | Description |
 |---|---|---|---|
-| `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | No | Upstream AgentRouter API base URL. Defined in exactly one place (`api/upstream.js`). Set this if AgentRouter changes hosts or you are pointing at a mirror/staging endpoint. |
+| `AGENTROUTER_BASE_URL` | `https://co.agentrouter.org` | No | Upstream AgentRouter API base URL. Defined in exactly one place (`api/upstream.js`). OpenAI-compatible routes append `/v1` (`https://co.agentrouter.org/v1/models`); the Anthropic route appends `/v1/messages`. Override this only if AgentRouter changes hosts. |
 | `AGENTROUTER_TIMEOUT_MS` | `30000` | No | Upstream timeout in ms. Covers connection + response headers, and the body read for non-streaming responses. For streaming responses it is the idle timeout between chunks. |
 | `PORT` | `3000` | No | Node/Render listen port. Render sets this automatically. |
 | `AGENTROUTER_MODELS_API_KEY` | *(unset)* | No | **Cloudflare Worker only.** Server-side key used to serve the public `/api/models` list on the landing page. If unset, `/api/models` returns a `503 models_key_not_configured` error. Never commit a real key. |
@@ -127,7 +127,7 @@ Error envelope:
     "type": "upstream_error",
     "code": "non_json_response",
     "status": 502,
-    "upstream_url": "https://agentrouter.org/v1/models",
+    "upstream_url": "https://co.agentrouter.org/v1/models",
     "upstream_status": 200,
     "upstream_content_type": "text/html; charset=utf-8",
     "preview": "<!doctype html> ..."
@@ -159,7 +159,7 @@ The goal is to surface that failure, not hide it.
    a WAF/captcha or interstitial page, not an API response.
 2. **Check the logs.** Every upstream call logs one line, and failures log a second:
    ```
-   [agentrouter] event=upstream_response method=GET url=https://agentrouter.org/v1/models status=200 content-type=text/html duration_ms=214
+   [agentrouter] event=upstream_response method=GET url=https://co.agentrouter.org/v1/models status=200 content-type=text/html duration_ms=214
    [agentrouter] body_preview(<=500 chars): <!doctype html><html>...
    ```
    Logs contain **only** URL, method, status, content-type, duration and a 500-character body
