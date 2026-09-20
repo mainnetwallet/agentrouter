@@ -41,10 +41,50 @@ export function setCorsHeaders(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta');
 }
 
+/** Node may hand back an array when a header is repeated. */
+function firstHeader(value) {
+  if (Array.isArray(value)) return value[0];
+  return typeof value === 'string' ? value : null;
+}
+
+/**
+ * Extract the client key WITHOUT interpreting/modifying it yet.
+ *
+ * Returns `{ raw, source, scheme, issues }` so the caller can sanitise the value
+ * (see upstream.normalizeApiKey) and report diagnostics. Never log `raw`.
+ */
 export function extractClientKey(req) {
-  const auth = req.headers.authorization;
-  if (auth?.startsWith('Bearer ')) return auth.substring(7);
-  if (req.headers['x-api-key']) return req.headers['x-api-key'];
+  const auth = firstHeader(req.headers.authorization);
+  if (auth && auth.trim().length > 0) {
+    const trimmed = auth.trim();
+    // "Authorization: Bearer" with nothing after it: a scheme but no credential.
+    if (/^bearer$/i.test(trimmed)) {
+      return {
+        raw: '',
+        source: 'authorization',
+        scheme: 'bearer',
+        issues: ['authorization_header_has_no_credential'],
+      };
+    }
+    const match = /^(\S+)\s+(.*)$/.exec(trimmed);
+    if (match) {
+      const scheme = match[1];
+      const issues = scheme.toLowerCase() === 'bearer' ? [] : [`unexpected_auth_scheme:${scheme.toLowerCase()}`];
+      return { raw: match[2], source: 'authorization', scheme, issues };
+    }
+    return {
+      raw: trimmed,
+      source: 'authorization',
+      scheme: 'none',
+      issues: ['authorization_missing_bearer_scheme'],
+    };
+  }
+
+  const xApiKey = firstHeader(req.headers['x-api-key']);
+  if (xApiKey && xApiKey.trim().length > 0) {
+    return { raw: xApiKey, source: 'x-api-key', scheme: 'x-api-key', issues: [] };
+  }
+
   return null;
 }
 

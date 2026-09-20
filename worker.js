@@ -1,6 +1,10 @@
 import {
   buildUpstreamUrl,
+  describeApiKey,
   fetchUpstream,
+  hasUnsafeKeyChars,
+  logAuthDiagnostics,
+  normalizeApiKey,
   isEventStream,
   logUpstreamDiagnostics,
   logUpstreamFailure,
@@ -31,11 +35,21 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta',
 };
 
+/**
+ * Extract the caller's key, tolerating surrounding whitespace, wrapping quotes
+ * and an accidental duplicate "Bearer " prefix. The key value itself is never
+ * logged.
+ */
 function extractClientKey(request) {
   const auth = request.headers.get('authorization');
-  if (auth?.startsWith('Bearer ')) return auth.substring(7);
+  if (auth && auth.trim().length > 0) {
+    const trimmed = auth.trim();
+    const match = /^(\S+)\s+(.*)$/.exec(trimmed);
+    const raw = match && match[1].toLowerCase() === 'bearer' ? match[2] : trimmed;
+    return normalizeApiKey(raw).key;
+  }
   const xApiKey = request.headers.get('x-api-key');
-  if (xApiKey) return xApiKey;
+  if (xApiKey && xApiKey.trim().length > 0) return normalizeApiKey(xApiKey).key;
   return null;
 }
 
@@ -67,6 +81,13 @@ async function forwardToAgentRouter(targetPath, request, env, { method = 'POST',
   if (!clientKey) {
     return errorResponse(401, 'Missing API key. Provide your AgentRouter key via Authorization: Bearer <key> or x-api-key', 'invalid_request_error', 'missing_api_key');
   }
+  if (hasUnsafeKeyChars(clientKey)) {
+    logAuthDiagnostics({ upstreamUrl: buildUpstreamUrl(targetPath, '', env), status: 401, source: 'client', key: clientKey, issues: ['unsafe_characters_in_key'], method, label });
+    return errorResponse(401, 'API key contains whitespace, control characters or non-ASCII characters and cannot be sent upstream', 'invalid_request_error', 'malformed_api_key', {
+      ...describeApiKey(clientKey),
+      key_issues: ['unsafe_characters_in_key'],
+    });
+  }
 
   const url = new URL(request.url);
   const upstreamUrl = buildUpstreamUrl(targetPath, url.search || '', env);
@@ -92,6 +113,10 @@ async function forwardToAgentRouter(targetPath, request, env, { method = 'POST',
   } catch (err) {
     logUpstreamFailure(err, { url: upstreamUrl, method, event: 'upstream_unreachable' });
     return errorResponse(err.status, err.message, err.type, err.code, err.details);
+  }
+
+  if (upstream.status === 401 || upstream.status === 403) {
+    logAuthDiagnostics({ upstreamUrl, status: upstream.status, source: 'client', key: clientKey, issues: [], method, label });
   }
 
   const contentType = upstream.headers.get('content-type') || '';

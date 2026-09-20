@@ -10,20 +10,45 @@ import {
 } from './utils.js';
 import {
   buildUpstreamUrl,
+  describeApiKey,
   fetchUpstream,
+  hasUnsafeKeyChars,
   isEventStream,
+  logAuthDiagnostics,
   logUpstreamDiagnostics,
   logUpstreamFailure,
+  normalizeApiKey,
   parseAgentRouterJson,
   previewBody,
   readResponseText,
   resolveTimeoutMs,
+  scrubSecret,
   UpstreamError,
 } from './upstream.js';
 
 function queryStringOf(url = '') {
   const index = url.indexOf('?');
   return index === -1 ? '' : url.slice(index + 1);
+}
+
+/**
+ * Extract + normalise the caller's key. The single code path used by the proxy
+ * and by the auth diagnostics endpoint, so both always agree on what is sent.
+ * Never log the returned `key`.
+ */
+export function resolveRequestKey(req) {
+  const extracted = extractClientKey(req);
+  if (!extracted) {
+    return { key: '', source: 'none', issues: ['no_key'], extracted: null, scheme: 'none' };
+  }
+  const normalized = normalizeApiKey(extracted.raw);
+  return {
+    key: normalized.key,
+    source: extracted.source,
+    scheme: extracted.scheme,
+    issues: [...extracted.issues, ...normalized.issues],
+    extracted,
+  };
 }
 
 /**
@@ -54,12 +79,53 @@ export async function proxyAgentRouter(req, res, options) {
     return res.end();
   }
 
-  const clientKey = extractClientKey(req);
-  if (requireKey && !clientKey) {
+  const resolvedKey = resolveRequestKey(req);
+  const clientKey = resolvedKey.key;
+  const keySource = resolvedKey.source;
+  const keyIssues = resolvedKey.issues;
+
+  if (requireKey && !resolvedKey.extracted) {
     return sendError(
       res, 401,
       'Missing API key. Provide your AgentRouter key via Authorization: Bearer <key> or x-api-key',
       'invalid_request_error', 'missing_api_key',
+    );
+  }
+
+  // The key is normalised (trim, unquote, drop a duplicated "Bearer ") and
+  // validated before it is ever placed in a header. It is never logged.
+
+  if (requireKey && !clientKey) {
+    logAuthDiagnostics({
+      upstreamUrl: buildUpstreamUrl(upstreamPath, '', env), status: 401, source: keySource,
+      key: '', issues: keyIssues, method, label,
+    });
+    return sendError(
+      res, 401,
+      'Invalid or empty API key after sanitisation. Provide your AgentRouter key via Authorization: Bearer <key>',
+      'invalid_request_error', 'malformed_api_key',
+      { key_source: keySource, key_issues: keyIssues },
+    );
+  }
+
+  if (requireKey && hasUnsafeKeyChars(clientKey)) {
+    logAuthDiagnostics({
+      upstreamUrl: buildUpstreamUrl(upstreamPath, '', env), status: 401, source: keySource,
+      key: clientKey, issues: [...keyIssues, 'unsafe_characters_in_key'], method, label,
+    });
+    const descriptor = describeApiKey(clientKey);
+    return sendError(
+      res, 401,
+      'API key contains whitespace, control characters or non-ASCII characters and cannot be sent upstream',
+      'invalid_request_error', 'malformed_api_key',
+      {
+        key_source: keySource,
+        key_issues: [...keyIssues, 'unsafe_characters_in_key'],
+        key_length: descriptor.key_length,
+        key_first3: descriptor.key_first3,
+        key_last3: descriptor.key_last3,
+        key_fingerprint: descriptor.key_fingerprint,
+      },
     );
   }
 
@@ -93,6 +159,13 @@ export async function proxyAgentRouter(req, res, options) {
   } catch (err) {
     logUpstreamFailure(err, { url: upstreamUrl, method, event: 'upstream_unreachable' });
     return sendError(res, err.status, err.message, err.type, err.code, err.details);
+  }
+
+  if (upstream.status === 401 || upstream.status === 403) {
+    logAuthDiagnostics({
+      upstreamUrl, status: upstream.status, source: keySource,
+      key: clientKey, issues: keyIssues, method, label,
+    });
   }
 
   const contentType = upstream.headers.get('content-type') || '';
@@ -148,7 +221,7 @@ export async function proxyAgentRouter(req, res, options) {
     return sendError(res, failure.status, failure.message, failure.type, failure.code, { ...baseDetails, ...failure.details });
   }
 
-  const preview = previewBody(text);
+  const preview = scrubSecret(previewBody(text), clientKey);
   logUpstreamDiagnostics({
     event: 'upstream_response',
     url: upstreamUrl,

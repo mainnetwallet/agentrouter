@@ -77,6 +77,122 @@ export function isEventStream(contentType) {
   return String(contentType || '').toLowerCase().includes('text/event-stream');
 }
 
+/**
+ * Normalise a client-supplied API key without ever exposing it.
+ *
+ * Handles the common ways a key gets mangled in transit: surrounding
+ * whitespace/newlines, wrapping quotes, and an accidental extra "Bearer "
+ * prefix (i.e. "Bearer Bearer <key>").
+ */
+export function normalizeApiKey(raw) {
+  const issues = [];
+
+  if (typeof raw !== 'string') {
+    return { key: '', issues: ['key_not_a_string'] };
+  }
+  if (raw.length === 0) {
+    return { key: '', issues: ['key_empty'] };
+  }
+
+  let key = raw;
+
+  if (/[\r\n]/.test(key)) issues.push('key_contains_newline');
+  if (key !== key.trim()) issues.push('key_had_surrounding_whitespace');
+  key = key.trim();
+
+  if (key.length >= 2 && ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'")))) {
+    issues.push('key_was_quoted');
+    key = key.slice(1, -1).trim();
+  }
+
+  if (/^(bearer\s+)+/i.test(key)) {
+    const prefixCount = (key.match(/bearer\s+/gi) || []).length;
+    issues.push(prefixCount > 1 ? 'duplicate_bearer_prefix' : 'key_included_bearer_prefix');
+    key = key.replace(/^(bearer\s+)+/i, '').trim();
+  }
+
+  if (key.length === 0) issues.push('key_empty_after_sanitization');
+
+  return { key, issues };
+}
+
+/** True when a key cannot be safely placed in an HTTP header. */
+export function hasUnsafeKeyChars(key) {
+  if (typeof key !== 'string' || key.length === 0) return true;
+  for (let i = 0; i < key.length; i += 1) {
+    const code = key.charCodeAt(i);
+    if (code < 33 || code > 126) return true; // control chars, spaces, non-ASCII
+  }
+  return false;
+}
+
+/**
+ * Remove a secret from text before it is logged or returned.
+ *
+ * Some upstreams echo the submitted credential in error messages
+ * (e.g. "invalid key sk-..."), so every preview is scrubbed first.
+ */
+export function scrubSecret(text, secret) {
+  if (typeof text !== 'string') return '';
+  if (typeof secret !== 'string' || secret.length < 4) return text;
+  return text.split(secret).join('<redacted>');
+}
+
+/**
+ * Describe a key for diagnostics WITHOUT exposing it.
+ *
+ * Returns only presence, length, the first/last 3 characters, and a short
+ * non-reversible FNV-1a fingerprint that lets two keys be compared for equality
+ * ("is MiniiChat sending the same key I configured?").
+ */
+export function describeApiKey(key) {
+  const present = typeof key === 'string' && key.length > 0;
+  let fingerprint = null;
+  if (present) {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < key.length; i += 1) {
+      hash ^= key.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    fingerprint = hash.toString(16).padStart(8, '0');
+  }
+  return {
+    key_present: present,
+    key_length: present ? key.length : 0,
+    key_first3: present ? key.slice(0, 3) : null,
+    key_last3: present ? key.slice(-3) : null,
+    key_fingerprint: fingerprint,
+  };
+}
+
+/**
+ * Log authentication diagnostics for a failed upstream auth response.
+ *
+ * NEVER logs the key itself: only presence, length, first/last 3 characters,
+ * a fingerprint, the detected issues, and whether the header was constructed.
+ */
+export function logAuthDiagnostics({ upstreamUrl, status, source, key, issues = [], method = 'GET', label }) {
+  const descriptor = describeApiKey(key);
+  const details = [
+    'event=auth_diagnostic',
+    method ? `method=${method}` : null,
+    label ? `endpoint=${label}` : null,
+    `url=${upstreamUrl}`,
+    Number.isFinite(status) ? `upstream_status=${status}` : null,
+    `key_source=${source || 'none'}`,
+    `key_present=${descriptor.key_present}`,
+    `key_length=${descriptor.key_length}`,
+    `key_first3=${descriptor.key_first3 ?? 'none'}`,
+    `key_last3=${descriptor.key_last3 ?? 'none'}`,
+    `key_fingerprint=${descriptor.key_fingerprint ?? 'none'}`,
+    `key_issues=${issues.length ? issues.join(',') : 'none'}`,
+    'authorization_header_constructed=true',
+    'authorization_scheme=Bearer',
+    'authorization_header_value=<redacted>',
+  ].filter(Boolean);
+  console.warn(`[agentrouter] ${details.join(' ')}`);
+}
+
 /** Collapse + truncate an upstream body for logging / diagnostics. */
 export function previewBody(text, limit = MAX_PREVIEW_CHARS) {
   if (typeof text !== 'string' || text.length === 0) return '';

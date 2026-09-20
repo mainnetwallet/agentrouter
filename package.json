@@ -3,8 +3,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/upstream.test.js test/server.test.js test/worker.test.js",
-    "check": "node --check server.js && node --check worker.js && node --check api/upstream.js && node --check api/utils.js && node --check api/proxy.js && node --check api/models.js && node --check api/chat.js && node --check api/messages.js"
+    "test": "node --test test/upstream.test.js test/auth.test.js test/server.test.js test/worker.test.js",
+    "check": "node --check server.js && node --check worker.js && node --check api/upstream.js && node --check api/utils.js && node --check api/proxy.js && node --check api/diagnostics.js && node --check api/models.js && node --check api/chat.js && node --check api/messages.js"
   },
   "engines": {
     "node": ">=20"

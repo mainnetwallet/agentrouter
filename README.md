@@ -27,6 +27,7 @@ Every variable is optional. The defaults work out of the box.
 | `AGENTROUTER_BASE_URL` | `https://co.agentrouter.org` | No | Upstream AgentRouter API base URL. Defined in exactly one place (`api/upstream.js`). OpenAI-compatible routes append `/v1` (`https://co.agentrouter.org/v1/models`); the Anthropic route appends `/v1/messages`. Override this only if AgentRouter changes hosts. |
 | `AGENTROUTER_TIMEOUT_MS` | `30000` | No | Upstream timeout in ms. Covers connection + response headers, and the body read for non-streaming responses. For streaming responses it is the idle timeout between chunks. |
 | `PORT` | `3000` | No | Node/Render listen port. Render sets this automatically. |
+| `AGENTROUTER_DEBUG_AUTH` | *(unset)* | No | Set to `1` to enable `GET /v1/debug/auth` (authentication diagnostics). Off by default; when off the route returns `404`. |
 | `AGENTROUTER_MODELS_API_KEY` | *(unset)* | No | **Cloudflare Worker only.** Server-side key used to serve the public `/api/models` list on the landing page. If unset, `/api/models` returns a `503 models_key_not_configured` error. Never commit a real key. |
 
 ```bash
@@ -148,6 +149,89 @@ Error envelope:
 | `bad_gateway` | 502 | Last-resort handler guard (unexpected internal failure). |
 
 Missing client key returns `401 invalid_request_error` without contacting upstream.
+
+## Authentication model
+
+The bridge is **stateless with respect to credentials**: there is no server-side AgentRouter key
+in the Node/Render path. Every request must carry the caller's own key, which the bridge
+normalises and forwards as:
+
+```
+Authorization: Bearer <AGENTROUTER_API_KEY>
+```
+
+Normalisation (so a mangled key is not a mysterious 401):
+
+| Case | Behaviour |
+|---|---|
+| `Bearer   <key>  ` (extra whitespace) | trimmed, forwarded as `Bearer <key>` |
+| `Bearer "<key>"` / `Bearer '<key>'` | wrapping quotes removed, forwarded as `Bearer <key>` |
+| `Bearer Bearer <key>` | duplicated prefix collapsed to a single `Bearer <key>` |
+| `Bearer` with no credential | `401 malformed_api_key`, upstream not contacted |
+| key containing whitespace/control/non-ASCII chars | `401 malformed_api_key`, upstream not contacted (cannot be placed in a header) |
+| `x-api-key: <key>` | forwarded as `Authorization: Bearer <key>` |
+
+The key value is never modified beyond that, never logged, and never stored.
+
+### Which key is at fault?
+
+Enable diagnostics temporarily (Render → Environment → `AGENTROUTER_DEBUG_AUTH=1`), then:
+
+```bash
+curl -s "https://your-service.onrender.com/v1/debug/auth" \
+  -H "Authorization: Bearer YOUR_AGENTROUTER_KEY"
+```
+
+The report performs the A/B comparison for you and contains **no key material** — only
+`key_present`, `key_length`, `key_first3`, `key_last3`, a non-reversible `key_fingerprint`,
+`key_source`, `key_issues`, and whether the Authorization header was constructed:
+
+```jsonc
+{
+  "authorization_scheme": "Bearer",
+  "authorization_header_constructed": true,
+  "request_key": { "key_present": true, "key_length": 45, "key_first3": "sk-", "key_last3": "xyz",
+                   "key_fingerprint": "1a2b3c4d", "key_source": "authorization", "key_issues": [] },
+  "env_keys_configured": [],
+  "probe_a_direct_upstream_with_same_key": { "status": 401, "content_type": "application/json",
+                                             "body_preview": "{\"code\":401,\"msg\":\"Invalid API Key!\"}" },
+  "diagnosis": "The upstream API rejected the key sent by the client..."
+}
+```
+
+Interpretation:
+
+- `probe_a...status: 200` and `/v1/models` also working → all good.
+- `probe_a...status: 401` → the key itself (or the account's access to `/v1/models`) is the problem;
+  the bridge is irrelevant.
+- `probe_a...status: 200` but `/v1/models` returns 401 → the bridge is mangling auth (report it).
+- `request_key.key_issues` non-empty → the client is sending a mangled key (whitespace, quotes,
+  duplicate `Bearer`); the bridge normalises it, so compare `key_fingerprint` with your known-good key.
+- `key_fingerprint` differs from the key you configured → MiniiChat is sending a **different key**.
+
+`probe_env_key` only runs when the caller's key fingerprint matches a configured server-side key,
+so the endpoint cannot be used as a free proxy for a server key. Turn `AGENTROUTER_DEBUG_AUTH` off
+again when you are done.
+
+To compare against the upstream directly without the bridge:
+
+```bash
+curl -i "https://co.agentrouter.org/v1/models" -H "Authorization: Bearer YOUR_AGENTROUTER_KEY"
+```
+
+### Diagnostics
+
+An upstream `401`/`403` logs a single line with key metadata only:
+
+```
+[agentrouter] event=auth_diagnostic method=GET url=https://co.agentrouter.org/v1/models upstream_status=401 \
+  key_source=authorization key_present=true key_length=45 key_first3=sk- key_last3=xyz \
+  key_fingerprint=1a2b3c4d key_issues=none authorization_header_constructed=true \
+  authorization_scheme=Bearer authorization_header_value=<redacted>
+```
+
+Upstream body previews are scrubbed of the key before being logged or returned, in case the
+upstream echoes the credential back in an error message.
 
 ## Diagnosing an upstream non-JSON response
 
