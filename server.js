@@ -1,17 +1,12 @@
 import http from 'http';
-import {
-  AGENTROUTER_BASE,
-  CLAUDE_CODE_HEADERS,
-  collectBody,
-  setCorsHeaders,
-  extractClientKey,
-  buildProviderHeaders,
-  forwardResponse,
-  sendError,
-} from './api/utils.js';
+import { pathToFileURL } from 'url';
+import { proxyAgentRouter } from './api/proxy.js';
+import { resolveAgentRouterBaseUrl } from './api/upstream.js';
+import { sendError } from './api/utils.js';
 
-const PORT = process.env.PORT || 3000;
+export const PORT = process.env.PORT || 3000;
 
+/** Minimal express-like helpers on top of the raw Node response. */
 function wrapRes(res) {
   res.status = (code) => { res.statusCode = code; return res; };
   res.json = (obj) => {
@@ -27,90 +22,59 @@ function wrapRes(res) {
   return res;
 }
 
-async function handleChat(req, res) {
-  setCorsHeaders(res);
-  if (req.method === 'OPTIONS') return res.status(204).end();
-
-  const clientKey = extractClientKey(req);
-  if (!clientKey) {
-    return sendError(res, 401, 'Missing API key. Provide your AgentRouter key via Authorization: Bearer <key>', 'invalid_request_error');
-  }
-
-  const bodyBuffer = await collectBody(req);
-  const headers = buildProviderHeaders(clientKey, bodyBuffer);
-
-  const response = await fetch(`${AGENTROUTER_BASE}/v1/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: bodyBuffer || undefined,
-  });
-
-  await forwardResponse(response, res);
-}
-
-async function handleMessages(req, res) {
-  setCorsHeaders(res);
-  if (req.method === 'OPTIONS') return res.status(204).end();
-
-  const clientKey = extractClientKey(req);
-  if (!clientKey) {
-    return sendError(res, 401, 'Missing API key. Provide your AgentRouter key via Authorization: Bearer <key> or x-api-key', 'invalid_request_error');
-  }
-
-  const bodyBuffer = await collectBody(req);
-  const headers = buildProviderHeaders(clientKey, bodyBuffer);
-
-  const qs = req.url.includes('?') ? req.url.substring(req.url.indexOf('?')) : '';
-  const response = await fetch(`${AGENTROUTER_BASE}/v1/messages${qs}`, {
-    method: 'POST',
-    headers,
-    body: bodyBuffer || undefined,
-  });
-
-  await forwardResponse(response, res);
-}
-
-async function handleModels(req, res) {
-  setCorsHeaders(res);
-  if (req.method === 'OPTIONS') return res.status(204).end();
-
-  const clientKey = extractClientKey(req);
-  if (!clientKey) {
-    return sendError(res, 401, 'Missing API key. Provide your AgentRouter key via Authorization: Bearer <key>', 'invalid_request_error');
-  }
-
-  const headers = {
-    ...CLAUDE_CODE_HEADERS,
-    'authorization': `Bearer ${clientKey}`,
-  };
-
-  const response = await fetch(`${AGENTROUTER_BASE}/v1/models`, { method: 'GET', headers });
-  const data = await response.json();
-  res.status(response.status).json(data);
-}
-
-const server = http.createServer(async (req, res) => {
+export async function handleRequest(req, res) {
   wrapRes(res);
   const path = req.url.split('?')[0];
 
   try {
     if (path === '/v1/chat/completions') {
-      await handleChat(req, res);
-    } else if (path === '/v1/messages') {
-      await handleMessages(req, res);
-    } else if (path === '/v1/models') {
-      await handleModels(req, res);
-    } else if (path === '/' || path === '/health') {
-      res.status(200).json({ ok: true, service: 'agentrouter-bridge' });
-    } else {
-      res.status(404).json({ error: { message: 'Not found', type: 'not_found' } });
+      // Streaming is preserved: SSE upstream responses are piped unbuffered.
+      return await proxyAgentRouter(req, res, {
+        method: 'POST',
+        upstreamPath: '/v1/chat/completions',
+        label: 'chat.completions',
+      });
     }
-  } catch (err) {
-    console.error('Handler error:', err);
-    sendError(res, 502, 'Bad Gateway - AgentRouter request failed', 'proxy_error', 'bad_gateway');
-  }
-});
 
-server.listen(PORT, () => {
-  console.log(`AgentRouter bridge listening on port ${PORT}`);
-});
+    if (path === '/v1/messages') {
+      // Anthropic-compatible endpoint; query string is forwarded upstream.
+      return await proxyAgentRouter(req, res, {
+        method: 'POST',
+        upstreamPath: '/v1/messages',
+        passQuery: true,
+        label: 'messages',
+      });
+    }
+
+    if (path === '/v1/models') {
+      return await proxyAgentRouter(req, res, {
+        method: 'GET',
+        upstreamPath: '/v1/models',
+        extraHeaders: { accept: 'application/json' },
+        label: 'models',
+      });
+    }
+
+    if (path === '/' || path === '/health') {
+      return res.status(200).json({ ok: true, service: 'agentrouter-bridge' });
+    }
+
+    return res.status(404).json({ error: { message: 'Not found', type: 'not_found', status: 404 } });
+  } catch (err) {
+    // Last-resort guard: never leak a stack trace or an unhandled SyntaxError.
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    console.error(`[agentrouter] unhandled_handler_error: ${message}`);
+    return sendError(res, 502, 'Bad Gateway - AgentRouter request failed', 'upstream_error', 'bad_gateway');
+  }
+}
+
+export const server = http.createServer(handleRequest);
+
+const isDirectRun = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isDirectRun) {
+  server.listen(PORT, () => {
+    console.log(`AgentRouter bridge listening on port ${PORT}`);
+    console.log(`[agentrouter] upstream_base_url=${resolveAgentRouterBaseUrl(process.env)}`);
+  });
+}

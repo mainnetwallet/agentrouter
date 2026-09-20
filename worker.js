@@ -1,5 +1,15 @@
-const AGENTROUTER_BASE = 'https://agentrouter.org';
-const PUBLIC_MODELS_KEY = 'sk-Wssgfu5GK1INDdXEBoxWbwIBKvLPu3K9KvN3SC7an5z9DfyV';
+import {
+  buildUpstreamUrl,
+  fetchUpstream,
+  isEventStream,
+  logUpstreamDiagnostics,
+  logUpstreamFailure,
+  parseAgentRouterJson,
+  previewBody,
+  readResponseText,
+  resolveTimeoutMs,
+  UpstreamError,
+} from './api/upstream.js';
 
 const CLAUDE_CODE_HEADERS = {
   'user-agent': 'claude-cli/2.1.114 (external, cli)',
@@ -29,20 +39,38 @@ function extractClientKey(request) {
   return null;
 }
 
-function errorResponse(status, message, type, code) {
-  const body = { error: { message, type } };
-  if (code) body.error.code = code;
+function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json', ...CORS_HEADERS },
+    headers: { 'content-type': 'application/json; charset=utf-8', ...CORS_HEADERS },
   });
 }
 
-async function forwardToAgentRouter(targetPath, request, method = 'POST', overrideKey = null) {
+function errorResponse(status, message, type, code, extra) {
+  const error = { message, type: type || 'upstream_error', status, ...(extra || {}) };
+  if (code) error.code = code;
+  return jsonResponse({ error }, status);
+}
+
+/**
+ * Forward a request to AgentRouter with defensive response handling.
+ *
+ * Mirrors api/proxy.js: streaming responses are piped through unbuffered, while
+ * JSON responses are validated so an HTML/WAF body returns a clean 502 JSON
+ * error instead of crashing the client with a JSON.parse SyntaxError.
+ *
+ * The upstream base URL comes from AGENTROUTER_BASE_URL (or the documented
+ * default); it is never hard-coded here.
+ */
+async function forwardToAgentRouter(targetPath, request, env, { method = 'POST', overrideKey = null, label = targetPath } = {}) {
   const clientKey = overrideKey || extractClientKey(request);
   if (!clientKey) {
-    return errorResponse(401, 'Missing API key. Provide your AgentRouter key via Authorization: Bearer <key> or x-api-key', 'invalid_request_error');
+    return errorResponse(401, 'Missing API key. Provide your AgentRouter key via Authorization: Bearer <key> or x-api-key', 'invalid_request_error', 'missing_api_key');
   }
+
+  const url = new URL(request.url);
+  const upstreamUrl = buildUpstreamUrl(targetPath, url.search || '', env);
+  const timeoutMs = resolveTimeoutMs(env);
 
   const headers = {
     ...CLAUDE_CODE_HEADERS,
@@ -51,25 +79,88 @@ async function forwardToAgentRouter(targetPath, request, method = 'POST', overri
 
   const init = { method, headers };
 
-  if (method === 'POST') {
+  if (method !== 'GET' && method !== 'HEAD') {
     headers['content-type'] = 'application/json';
     init.body = await request.arrayBuffer();
   }
 
-  const url = new URL(request.url);
-  const qs = url.search || '';
-  const upstream = await fetch(`${AGENTROUTER_BASE}${targetPath}${qs}`, init);
+  let upstream;
+  let controller;
+  let durationMs;
+  try {
+    ({ response: upstream, controller, durationMs } = await fetchUpstream(upstreamUrl, init, { env, timeoutMs }));
+  } catch (err) {
+    logUpstreamFailure(err, { url: upstreamUrl, method, event: 'upstream_unreachable' });
+    return errorResponse(err.status, err.message, err.type, err.code, err.details);
+  }
 
-  const respHeaders = new Headers(upstream.headers);
-  respHeaders.delete('content-encoding');
-  respHeaders.delete('content-length');
-  respHeaders.delete('transfer-encoding');
-  for (const [k, v] of Object.entries(CORS_HEADERS)) respHeaders.set(k, v);
+  const contentType = upstream.headers.get('content-type') || '';
+  const baseDetails = {
+    upstream_url: upstreamUrl,
+    upstream_status: upstream.status,
+    upstream_content_type: contentType || 'none',
+  };
+  const outHeaders = new Headers(CORS_HEADERS);
+  for (const name of ['retry-after', 'request-id', 'x-request-id']) {
+    const value = upstream.headers.get(name);
+    if (value) outHeaders.set(name, value);
+  }
 
-  return new Response(upstream.body, {
+  if (upstream.status >= 300 && upstream.status < 400) {
+    const err = new UpstreamError('Upstream AgentRouter returned an unexpected redirect', {
+      status: 502,
+      code: 'unexpected_redirect',
+      details: { ...baseDetails, upstream_location: upstream.headers.get('location') || 'none' },
+    });
+    logUpstreamFailure(err, { url: upstreamUrl, method, event: 'upstream_redirect' });
+    return errorResponse(err.status, err.message, err.type, err.code, err.details);
+  }
+
+  if (isEventStream(contentType)) {
+    logUpstreamDiagnostics({
+      event: 'upstream_stream_open',
+      url: upstreamUrl,
+      method,
+      status: upstream.status,
+      contentType,
+      durationMs,
+      note: `${label} streaming`,
+    });
+    outHeaders.set('content-type', upstream.headers.get('content-type') || 'text/event-stream');
+    outHeaders.set('cache-control', 'no-cache');
+    return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
+  }
+
+  let text;
+  try {
+    text = await readResponseText(upstream, timeoutMs, controller);
+  } catch (err) {
+    const failure = err instanceof UpstreamError ? err : new UpstreamError('Upstream AgentRouter response could not be read', { status: 502, code: 'network_error' });
+    logUpstreamFailure(failure, { url: upstreamUrl, method, event: 'upstream_body_read_failed' });
+    return errorResponse(failure.status, failure.message, failure.type, failure.code, { ...baseDetails, ...failure.details });
+  }
+
+  const preview = previewBody(text);
+  logUpstreamDiagnostics({
+    event: 'upstream_response',
+    url: upstreamUrl,
+    method,
     status: upstream.status,
-    headers: respHeaders,
+    contentType,
+    durationMs,
+    preview,
   });
+
+  try {
+    parseAgentRouterJson(text, { url: upstreamUrl, status: upstream.status, contentType });
+  } catch (err) {
+    const failure = err instanceof UpstreamError ? err : new UpstreamError('Upstream AgentRouter returned an unexpected response', { status: 502, code: 'upstream_error' });
+    logUpstreamFailure(failure, { url: upstreamUrl, method, event: 'upstream_invalid_payload' });
+    return errorResponse(failure.status, failure.message, failure.type, failure.code, { ...baseDetails, ...failure.details, preview });
+  }
+
+  outHeaders.set('content-type', 'application/json; charset=utf-8');
+  return new Response(text, { status: upstream.status, headers: outHeaders });
 }
 
 const OG_IMAGE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
@@ -96,7 +187,7 @@ const OG_IMAGE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" heigh
 <text y="128" font-family="ui-monospace, monospace" font-size="22" fill="#a1a1aa">Claude Opus 4.6 · GPT · DeepSeek · GLM · and more</text>
 </g>
 <rect x="80" y="520" width="12" height="44" rx="6" fill="url(#accent)"/>
-<text x="108" y="552" font-family="ui-monospace, monospace" font-size="20" fill="#a1a1aa">bring your own AgentRouter key · no logs · no limits</text>
+<text x="108" y="552" font-family="ui-monospace, monospace" font-size="20" fill="#a1a1aa">bring your own AgentRouter key · secrets never logged</text>
 </svg>`;
 
 const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
@@ -365,8 +456,8 @@ async function loadModels() {
   const container = document.getElementById('models');
   try {
     const res = await fetch('/api/models');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const json = await res.json();
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((json.error && json.error.message) || ('HTTP ' + res.status));
     const models = json.data || [];
     if (!models.length) {
       container.innerHTML = '<div class="err">No models available</div>';
@@ -402,7 +493,7 @@ loadModels();
 }
 
 export default {
-  async fetch(request) {
+  async fetch(request, env = {}) {
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
@@ -412,16 +503,35 @@ export default {
 
     try {
       if (path === '/v1/chat/completions' && request.method === 'POST') {
-        return await forwardToAgentRouter('/v1/chat/completions', request, 'POST');
+        return await forwardToAgentRouter('/v1/chat/completions', request, env, {
+          method: 'POST', label: 'chat.completions',
+        });
       }
       if (path === '/v1/messages' && request.method === 'POST') {
-        return await forwardToAgentRouter('/v1/messages', request, 'POST');
+        return await forwardToAgentRouter('/v1/messages', request, env, {
+          method: 'POST', label: 'messages',
+        });
       }
       if (path === '/v1/models' && request.method === 'GET') {
-        return await forwardToAgentRouter('/v1/models', request, 'GET');
+        return await forwardToAgentRouter('/v1/models', request, env, {
+          method: 'GET', label: 'models',
+        });
       }
       if (path === '/api/models' && request.method === 'GET') {
-        return await forwardToAgentRouter('/v1/models', request, 'GET', PUBLIC_MODELS_KEY);
+        // The public landing-page model list is served with a server-side key
+        // (AGENTROUTER_MODELS_API_KEY). No key is ever committed to the repo.
+        const publicKey = env.AGENTROUTER_MODELS_API_KEY;
+        if (!publicKey) {
+          return errorResponse(
+            503,
+            'Public model list is unavailable: the server-side AGENTROUTER_MODELS_API_KEY is not configured.',
+            'configuration_error',
+            'models_key_not_configured',
+          );
+        }
+        return await forwardToAgentRouter('/v1/models', request, env, {
+          method: 'GET', overrideKey: publicKey, label: 'public.models',
+        });
       }
       if (path === '/og.svg' && request.method === 'GET') {
         return new Response(OG_IMAGE_SVG, {
@@ -455,8 +565,9 @@ export default {
       }
       return errorResponse(404, 'Not found', 'not_found');
     } catch (err) {
-      console.error('Worker error:', err);
-      return errorResponse(502, 'Bad Gateway - AgentRouter request failed', 'proxy_error', 'bad_gateway');
+      // Last-resort guard: never surface an uncaught SyntaxError to clients.
+      console.error(`[agentrouter] unhandled_worker_error: ${(err && err.message) || err}`);
+      return errorResponse(502, 'Bad Gateway - AgentRouter request failed', 'upstream_error', 'bad_gateway');
     }
   },
 };
